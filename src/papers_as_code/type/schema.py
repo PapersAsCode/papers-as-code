@@ -1,0 +1,9 @@
+from abc import ABC, abstractmethod
+
+
+class Schema(ABC):
+    """The format for a type"""
+
+    @abstractmethod
+    def validate() -> bool:
+        return True
