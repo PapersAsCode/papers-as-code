@@ -1,14 +1,13 @@
-from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, TypeAlias, cast
 
-from papers_as_code.transforms.base import BaseTransform, Slots
-from papers_as_code.transforms.many_to_many import ManyToManyTransform
+from papers_as_code.transforms.shape import Shape
+from papers_as_code.transforms.transform import Transform
 from papers_as_code.type import Type
 from papers_as_code.utils import Graph
 
 
-Node: TypeAlias = BaseTransform[Any, Any]
+Node: TypeAlias = Transform[Any, Any]
 
 
 @dataclass(frozen=True)
@@ -25,15 +24,15 @@ Nodes: TypeAlias = list[Node]
 Edges: TypeAlias = list[Edge]
 
 
-class Pipeline[T_ins: tuple[Type, ...], T_outs: tuple[Type, ...]](
-    ManyToManyTransform[T_ins, T_outs]
-):
+class Pipeline[
+    T_in: Type | tuple[Type, ...],
+    T_out: Type | tuple[Type, ...],
+](Transform[T_in, T_out]):
     """
     A graph of transforms, which is itself a transform.
 
-    The pipeline's inputs feed the input slots of the root nodes, and its
-    outputs are the outputs of the leaf nodes, both in the order of `nodes`.
-    Outputs of other nodes that no edge consumes are discarded.
+    The pipeline's input feeds the root nodes, and its output comes from the
+    leaf nodes
     """
     nodes: Nodes
     edges: Edges
@@ -44,58 +43,54 @@ class Pipeline[T_ins: tuple[Type, ...], T_outs: tuple[Type, ...]](
         self.edges = edges
         self.graph = Graph(nodes, [(edge.source, edge.target) for edge in edges])
 
-    @property
-    def input_types(self) -> Slots:
-        return _concatenate(node.input_types for node in self.graph.roots())
+    def input_shape(self) -> Shape:
+        return Shape.combine([self._input_shape(root) for root in self.graph.roots()])
 
-    @property
-    def output_types(self) -> Slots:
-        return _concatenate(node.output_types for node in self.graph.leaves())
+    def output_shape(self) -> Shape | None:
+        shapes = [leaf.output_shape() for leaf in self.graph.leaves()]
+        known = [shape for shape in shapes if shape is not None]
+        return Shape.combine(known) if len(known) == len(shapes) else None
 
-    def transform(self, value: T_ins) -> T_outs:
+    def transform(self, value: T_in) -> T_out:
         root_slots = [
             (root, slot)
             for root in self.graph.roots()
-            for slot in range(self._input_count(root))
+            for slot in range(self._input_shape(root).count)
         ]
-        slot_values: dict[tuple[Node, int], Type] = dict(
-            zip(root_slots, value, strict=True)
+        slot_values: dict[tuple[Node, int], Any] = dict(
+            zip(root_slots, self.input_shape().unpack(value), strict=True)
         )
-        outputs: dict[Node, tuple[Type, ...]] = {}
+        results: dict[Node, Any] = {}
 
         for node in self.graph.topological_order():
-            inputs = tuple(
-                slot_values[(node, slot)] for slot in range(self._input_count(node))
-            )
-            outputs[node] = node.run(inputs)
+            shape = self._input_shape(node)
+            inputs = tuple(slot_values[(node, slot)] for slot in range(shape.count))
+            results[node] = node.transform(shape.pack(inputs))
 
             for edge in self.edges:
                 if edge.source is node:
-                    slot_values[(edge.target, edge.target_slot)] = outputs[node][
-                        edge.source_slot
-                    ]
+                    output = _output_slots(results[node])[edge.source_slot]
+                    slot_values[(edge.target, edge.target_slot)] = output
 
+        leaves = self.graph.leaves()
+        if len(leaves) == 1:
+            return cast(T_out, results[leaves[0]])
         return cast(
-            T_outs,
-            tuple(output for leaf in self.graph.leaves() for output in outputs[leaf]),
+            T_out,
+            tuple(slot for leaf in leaves for slot in _output_slots(results[leaf])),
         )
 
-    def _input_count(self, node: Node) -> int:
-        """Return a node's number of input slots, as declared or as wired."""
-        if node.input_types is not None:
-            return len(node.input_types)
+    def _input_shape(self, node: Node) -> Shape:
+        """Return a node's annotated input shape, or one inferred from its edges."""
+        annotated = node.input_shape()
+        if annotated is not None:
+            return annotated
 
         fed_slots = [edge.target_slot for edge in self.edges if edge.target is node]
-        return max(fed_slots, default=-1) + 1
+        count = max(fed_slots, default=0) + 1
+        return Shape(many=count > 1, count=count)
 
 
-def _concatenate(all_slots: Iterable[Slots]) -> Slots:
-    """Join the slots of several nodes, or None if any of them are unknown."""
-    combined: list[type[Type] | None] = []
-
-    for slots in all_slots:
-        if slots is None:
-            return None
-        combined.extend(slots)
-
-    return tuple(combined)
+def _output_slots(result: Any) -> tuple[Any, ...]:
+    """Split a transform's result into one value per output slot."""
+    return result if isinstance(result, tuple) else (result,)

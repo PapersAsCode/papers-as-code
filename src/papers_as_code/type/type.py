@@ -1,9 +1,17 @@
-from typing import Any
-from papers_as_code.type import Schema
+from abc import ABC
+from typing import ClassVar
+
+from papers_as_code.type.schema import Schema
 
 
-class Type:
-    schema: Schema
+class Type[R](ABC):
+    """A value, held as its representation `repr`, with a schema giving it meaning."""
 
-    def __init__(self, repr: Any, schema: Schema):
-        self.schema = schema
+    schema: ClassVar[Schema]
+    repr: R
+
+    def __init__(self, repr: R):
+        self.repr = repr
+
+    def validate(self) -> bool:
+        raise NotImplementedError

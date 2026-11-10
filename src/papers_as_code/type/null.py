@@ -3,14 +3,15 @@ from papers_as_code.type.type import Type
 
 
 class NullSchema(Schema):
-    """The format of a value that holds no data."""
+    name = "null"
+    version = "0.1.0"
+    description = "No data"
 
-    def validate(self) -> bool:
-        return True
 
-
-class Null(Type):
+class Null(Type[None]):
     """No data: what a source takes as input, and a sink gives as output."""
 
+    schema = NullSchema()
+
     def __init__(self) -> None:
-        super().__init__(None, NullSchema())
+        super().__init__(None)

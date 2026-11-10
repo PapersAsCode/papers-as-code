@@ -1,4 +1,6 @@
-from typing import TypeAlias
+from typing import TypedDict
 
 
-Label: TypeAlias = str
+class Label(TypedDict):
+    key: str
+    value: str
