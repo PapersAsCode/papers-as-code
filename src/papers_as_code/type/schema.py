@@ -5,5 +5,5 @@ class Schema(ABC):
     """The format for a type"""
 
     @abstractmethod
-    def validate() -> bool:
+    def validate(self) -> bool:
         return True

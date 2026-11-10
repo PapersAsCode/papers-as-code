@@ -1,62 +1,101 @@
-from typing import Literal, TypeAlias
+from collections.abc import Iterable
+from dataclasses import dataclass
+from typing import Any, TypeAlias, cast
 
-from papers_as_code.transforms.base import BaseTransform
-from papers_as_code.transforms.transform import Transform
+from papers_as_code.transforms.base import BaseTransform, Slots
+from papers_as_code.transforms.many_to_many import ManyToManyTransform
 from papers_as_code.type import Type
-from papers_as_code.utils.logger import get_logger
+from papers_as_code.utils import Graph
 
 
-logger = get_logger(__name__)
+Node: TypeAlias = BaseTransform[Any, Any]
 
 
-Nodes: TypeAlias = list[Transform]
-Edges: TypeAlias = dict[Transform, list[Transform]]
+@dataclass(frozen=True)
+class Edge:
+    """Feeds one output slot of `source` into one input slot of `target`."""
+
+    source: Node
+    target: Node
+    source_slot: int = 0
+    target_slot: int = 0
 
 
-ValidationLevel: TypeAlias = Literal["throw", "warn"]
-
-
-class GraphTopologyException(Exception):
-    """The transforms in a pipeline do not fit together."""
+Nodes: TypeAlias = list[Node]
+Edges: TypeAlias = list[Edge]
 
 
 class Pipeline[T_ins: tuple[Type, ...], T_outs: tuple[Type, ...]](
-    BaseTransform[T_ins, T_outs]
+    ManyToManyTransform[T_ins, T_outs]
 ):
+    """
+    A graph of transforms, which is itself a transform.
+
+    The pipeline's inputs feed the input slots of the root nodes, and its
+    outputs are the outputs of the leaf nodes, both in the order of `nodes`.
+    Outputs of other nodes that no edge consumes are discarded.
+    """
     nodes: Nodes
     edges: Edges
+    graph: Graph[Node]
 
-    def __init__(self, nodes: Nodes, edges: Edges, validate: ValidationLevel = "throw"):
+    def __init__(self, nodes: Nodes, edges: Edges):
         self.nodes = nodes
         self.edges = edges
+        self.graph = Graph(nodes, [(edge.source, edge.target) for edge in edges])
 
-        try:
-            self.validate_graph()
-        except GraphTopologyException as e:
-            if validate == "throw":
-                raise e
-            elif validate == "warn":
-                logger.warning("Pipeline failed validation: %s", e)
+    @property
+    def input_types(self) -> Slots:
+        return _concatenate(node.input_types for node in self.graph.roots())
+
+    @property
+    def output_types(self) -> Slots:
+        return _concatenate(node.output_types for node in self.graph.leaves())
 
     def transform(self, value: T_ins) -> T_outs:
-        pass
+        root_slots = [
+            (root, slot)
+            for root in self.graph.roots()
+            for slot in range(self._input_count(root))
+        ]
+        slot_values: dict[tuple[Node, int], Type] = dict(
+            zip(root_slots, value, strict=True)
+        )
+        outputs: dict[Node, tuple[Type, ...]] = {}
 
-    def validate_graph(self) -> None:
-        """Check that each transform's output fits the input of the next."""
-        mismatches: list[str] = []
+        for node in self.graph.topological_order():
+            inputs = tuple(
+                slot_values[(node, slot)] for slot in range(self._input_count(node))
+            )
+            outputs[node] = node.run(inputs)
 
-        for source, targets in self.edges.items():
-            for target in targets:
-                produced = source.output_type
-                expected = target.input_type
+            for edge in self.edges:
+                if edge.source is node:
+                    slot_values[(edge.target, edge.target_slot)] = outputs[node][
+                        edge.source_slot
+                    ]
 
-                edge = f"{type(source).__name__} -> {type(target).__name__}"
-                if produced is None or expected is None:
-                    logger.info("Skipping validation of %s: type not specified", edge)
-                elif not issubclass(produced, expected):
-                    mismatches.append(
-                        f"{edge}: {produced.__name__} does not fit {expected.__name__}"
-                    )
+        return cast(
+            T_outs,
+            tuple(output for leaf in self.graph.leaves() for output in outputs[leaf]),
+        )
 
-        if mismatches:
-            raise GraphTopologyException("; ".join(mismatches))
+    def _input_count(self, node: Node) -> int:
+        """Return a node's number of input slots, as declared or as wired."""
+        if node.input_types is not None:
+            return len(node.input_types)
+
+        fed_slots = [edge.target_slot for edge in self.edges if edge.target is node]
+        return max(fed_slots, default=-1) + 1
+
+
+def _concatenate(all_slots: Iterable[Slots]) -> Slots:
+    """Join the slots of several nodes, or None if any of them are unknown."""
+    combined: list[type[Type] | None] = []
+
+    for slots in all_slots:
+        if slots is None:
+            return None
+        combined.extend(slots)
+
+    return tuple(combined)
